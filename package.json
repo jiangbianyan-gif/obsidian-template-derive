@@ -1,6 +1,6 @@
 {
   "name": "obsidian-template-derive",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "按自定义规则，把笔记里某个段落自动渲染到另一个文件。写了才生成，没写就不生成。",
   "main": "main.js",
   "scripts": {
