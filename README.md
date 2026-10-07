@@ -26,7 +26,7 @@ Obsidian 里有一类很别扭的需求：**一份笔记里塞着两种东西，
 
 1. 从 [Releases](../../releases) 下载 `main.js` 和 `manifest.json`
 2. 放进 `<你的库>/.obsidian/plugins/template-derive/`
-3. Obsidian → 设置 → 第三方插件 → 关闭「安全模式」→ 启用「模板衍生」
+3. Obsidian → 设置 → 第三方插件 → 关闭「安全模式」→ 启用 **Template Derive**
 
 插件只支持**桌面版**：写入走的是「临时文件 + rename」的原子写入，`fs` 在移动端不可用（见下面「为什么必须原子写入」）。
 
@@ -56,7 +56,7 @@ Obsidian 里有一类很别扭的需求：**一份笔记里塞着两种东西，
 
 ### 加一条自己的规则
 
-设置 → 模板衍生 → 新增规则，填四个东西：
+设置 → Template Derive → 新增规则，填四个东西：
 
 **① 源** — 哪个文件夹、文件名长什么样
 

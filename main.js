@@ -957,7 +957,7 @@ const HEAD_TEMPLATE = [
   '',
   '# {{date}} {{rule}}',
   '',
-  '> 本文件由「模板衍生」插件维护：`template-derive:start` 与 `template-derive:end` 之间的内容',
+  '> 本文件由 Template Derive 插件维护：`template-derive:start` 与 `template-derive:end` 之间的内容',
   '> 会跟着源文件自动更新，你在标记外面写的东西不会被覆盖。'
 ].join('\n');
 
@@ -1451,7 +1451,7 @@ if (obsidianApi) {
           if (await adapter.exists(p)) await this._run(p, opts);
         } catch (e) { /* 单个源文件出错不影响其它规则 */ }
       }
-      if (opts && opts.notify) new Notice('模板衍生：今天的源文件都处理过了');
+      if (opts && opts.notify) new Notice('Template Derive：今天的源文件都处理过了');
     }
 
     _schedule(vaultPath) {
@@ -1528,11 +1528,11 @@ if (obsidianApi) {
         }
 
         if (o.notify) {
-          new Notice(said.length ? '模板衍生：' + said.join('，') : '模板衍生：已经是最新的了');
+          new Notice(said.length ? 'Template Derive：' + said.join('，') : 'Template Derive：已经是最新的了');
         }
       } catch (err) {
         console.error('[template-derive]', err);
-        if (o.notify) new Notice('模板衍生出错了，详见控制台');
+        if (o.notify) new Notice('Template Derive 出错了，详见控制台');
       } finally {
         this._busy = false;
         if (this._again) {
@@ -1586,7 +1586,7 @@ if (obsidianApi) {
       c.empty();
       const p = this.plugin;
 
-      c.createEl('h2', { text: '模板衍生' });
+      c.createEl('h2', { text: 'Template Derive' });
       c.createEl('p', {
         cls: 'setting-item-description',
         text: '一条规则 = 「哪个文件夹里的哪个段落 → 渲染到哪个文件」。段落里写了东西就生成 / 更新产物，没写就不生成。规则只动 auto 标记之间的区域，标记外面你手写的内容永远不会被覆盖。'
