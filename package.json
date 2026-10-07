@@ -1,0 +1,29 @@
+{
+  "name": "obsidian-template-derive",
+  "version": "1.0.0",
+  "description": "按自定义规则，把笔记里某个段落自动渲染到另一个文件。写了才生成，没写就不生成。",
+  "main": "main.js",
+  "scripts": {
+    "check": "node --check main.js",
+    "test": "node test/run.cjs",
+    "verify": "npm run check && npm run test"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "template",
+    "automation",
+    "daily-notes",
+    "journaling"
+  ],
+  "author": "jiangbianyan-gif",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jiangbianyan-gif/obsidian-template-derive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jiangbianyan-gif/obsidian-template-derive/issues"
+  },
+  "homepage": "https://github.com/jiangbianyan-gif/obsidian-template-derive#readme"
+}
