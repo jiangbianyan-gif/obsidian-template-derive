@@ -3,6 +3,10 @@ name: Release
 # 手动触发。版本号留空 = 直接用 manifest.json 里的 version。
 # tag 由这个 workflow 自己建，不要手动建，也不带前缀 v —— Obsidian 认的是
 # 「tag 名 === manifest.json 的 version」。
+#
+# 用到的 action：actions/checkout@v5 + actions/setup-node@v5。
+# 两个都必须是 v5 或更新：v4 及更早的 action.yml 写的是 using: node20，
+# Node 20 已停维，runner 会把它强制挪到 Node 24 并在运行摘要里报「Node.js 20 已弃用」。
 on:
   workflow_dispatch:
     inputs:
@@ -19,14 +23,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 取出仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: 配 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          # 22 是本插件开发机上用的版本，CI 与本地保持一致，省得出现「本地过、CI 挂」
+          node-version: '22'
+          # v5 起会「自动」按 package.json 的 packageManager 字段开包管理器缓存
+          # （写在 v5.0.0 的 Breaking Changes 里）。本仓库零运行时依赖、也没提交
+          # lockfile，留着只会多跑一个缓存 post 步骤，显式关掉，行为与 v4 一致。
+          # ★ 引号不能省：setup-node 读它时是 `getInput(x) || 'true'`，
+          #   不加引号的裸 false 若被转成空串，反而会退回「开」。
+          package-manager-cache: 'false'
 
       - name: 确定版本号
         id: v
