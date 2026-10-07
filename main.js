@@ -98,6 +98,41 @@ function daysBetween(a, b) {
   return Math.round((t2 - t1) / 86400000);
 }
 
+/** YYYY-MM-DD 往后挪 N 天（负数就是往前）。同样用 UTC，绕开夏令时。 */
+function shiftDate(dateStr, days) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+  if (!m) return '';
+  const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+    + Number(days || 0) * 86400000;
+  const d = new Date(t);
+  return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
+}
+
+/**
+ * 渲染**核心 Daily Notes** 模板里的变量：`{{date:格式}}` `{{date}}` `{{time}}` `{{title}}`。
+ *
+ * 为什么要自己再实现一遍：核心插件的「打开今天的日记」只认今天这一份，
+ * 想去明天就得自己算日期、自己把模板填出来，这一步走的就是这里。
+ *
+ * ★ 认不出来的 `{{...}}` 原样保留（和 `evalVar` 同一条红线）：
+ *   别人的模板里可能混着别的插件的变量，吃掉就再也找不回来了。
+ */
+function renderDailyNoteVars(tpl, vars) {
+  const v = vars || {};
+  return String(tpl == null ? '' : tpl).replace(
+    /\{\{\s*([^{}:\s]+)\s*(?::\s*([^{}]*?)\s*)?\}\}/g,
+    (all, name, arg) => {
+      const n = String(name || '').toLowerCase();
+      // ★ 认得但**取不到值**的时候也原样留下，不要悄悄换成空串 ——
+      //   宁可在文件里看到 {{date:YYYY}}，也别让我看不出这里本来是要填日期的。
+      if (n === 'date') return v.date ? formatDate(v.date, String(arg == null ? '' : arg)) : all;
+      if (n === 'time') return v.time == null ? all : String(v.time);
+      if (n === 'title') return v.title == null ? all : String(v.title);
+      return all;
+    }
+  );
+}
+
 /**
  * 日期格式化。只实现 moment 的常用 token 子集 ——
  * 有意和 Obsidian 核心 Templates 的 {{date:...}} 保持一致，
@@ -251,6 +286,26 @@ function subSectionBody(body, subTitle) {
   return buf.join('\n');
 }
 
+/**
+ * 按 `###` 子小节把复选框切成一组一组（只保留真的有内容的组）。
+ * 用来让「今天的计划」按课程分点输出 —— 平铺成一长串看不出哪条属于哪门课。
+ */
+function groupBySubSection(body) {
+  const lines = String(body == null ? '' : body).split(/\r?\n/);
+  const groups = [];
+  let cur = { title: '', buf: [] };
+  const push = () => { if (cur.title || cur.buf.join('').trim()) groups.push(cur); };
+  for (const ln of lines) {
+    const h = /^###\s+(.+?)\s*$/.exec(ln);
+    if (h) { push(); cur = { title: h[1], buf: [] }; continue; }
+    cur.buf.push(ln);
+  }
+  push();
+  return groups
+    .map((g) => ({ title: g.title, items: extractCheckboxItems(g.buf.join('\n')) }))
+    .filter((g) => g.items.length);
+}
+
 function frontmatterValue(frontmatter, key) {
   if (!frontmatter || !key) return '';
   const re = new RegExp('^' + String(key).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*(.+?)\\s*$', 'm');
@@ -326,8 +381,49 @@ function cleanForSubstance(text) {
 
 function cleanLen(text) { return cleanForSubstance(text).length; }
 
+/**
+ * ★ 「整段只剩数字」的兜底。
+ *
+ * cleanForSubstance 会把阿拉伯数字**全部**丢掉 —— 那是为了让模板自带的打分占位
+ * （`- 精力：　1/ 5`）不算内容，否则空日记也会凭空生成文件。
+ * 但代价是：用户真的只写了数字（`123`、`30 词` 里的数字被剥完只剩词还行，
+ * 整段纯数字则一个字不剩）时会被判成「没写」，衍生文件死活不生成。
+ *
+ * 所以只在 cleanLen 已经是 0 时才看这里，并且**先剔掉 `n/5` 打分形态**，
+ * 这样成长轨迹的空模板（`1/ 5` 铺满）不会被误判成写了。
+ * 返回「非空格、非装饰符、非数字的其它字符」为 0 时的数字个数，否则记 0
+ * （有别的内容时该由 cleanLen 判，别在这里重复计）。
+ */
+function digitLen(text) {
+  let t = String(text == null ? '' : text);
+  t = t.replace(/<!--[\s\S]*?-->/g, ' ');
+  t = stripCallouts(t);
+  t = t.replace(/^#{1,6}[^\n]*$/gm, ' ');
+  t = t.replace(/^\s*>\s?/gm, ' ');
+  t = t.replace(/\*\*[^*\n]*\*\*/g, ' ');
+  t = t.replace(/`[^`\n]*`/g, ' ');
+  t = t.replace(/^\s*[-*+]\s*\[[ xX]\]\s*/gm, ' ');
+  t = t.replace(/^\s*(?:\d+[.)]\s*|[-*+]\s*)/gm, ' ');
+  for (let k = 0; k < 8; k++) {
+    const next = t.replace(/^[^：:\n]{1,40}[：:]/gm, ' ');
+    if (next === t) break;
+    t = next;
+  }
+  t = t.replace(/\d{1,3}\s*\/\s*5/g, ' ');
+  let digits = 0;
+  let other = 0;
+  for (const ch of t) {
+    if (ch >= '0' && ch <= '9') { digits++; continue; }
+    if (DECOR.has(ch)) continue;
+    other++;
+  }
+  return other === 0 ? digits : 0;
+}
+
 /** 这一段到底有没有写东西。 */
-function hasSubstance(text) { return cleanLen(text) >= MIN_SUBSTANCE; }
+function hasSubstance(text) {
+  return cleanLen(text) >= MIN_SUBSTANCE || digitLen(text) >= MIN_SUBSTANCE;
+}
 
 /** 光打了分没写字也算写了（成长轨迹那类段落用）。 */
 function hasSubstanceOrScore(text) {
@@ -362,7 +458,14 @@ function extractLabeledBullets(text) {
   for (const ln of String(text == null ? '' : text).split(/\r?\n/)) {
     let m = /^\s*[-*+]\s*\*\*(.+?)\*\*\s*(?:[（(][^）)\n]*[）)])?\s*[：:]\s*([\s\S]*)$/.exec(ln);
     if (!m) m = /^\s*[-*+]\s*([^：:*\[\]\n]{1,40}?)\s*[：:]\s*([\s\S]*)$/.exec(ln);
-    if (m) out.push({ label: m[1].trim(), value: m[2].trim() });
+    if (m) { out.push({ label: m[1].trim(), value: m[2].trim() }); continue; }
+    // ★ 缩进的续行并入上一条。在同一条下面换行接着写是很自然的动作，
+    //   以前这些行会被整段丢掉（`- **去哪**：123` 下面另起一行写的 23 就没了）。
+    //   排除小标题，免得把段落里的 ### 小节名吞进上一条的值里。
+    if (out.length && /^[ \t]+\S/.test(ln) && !/^[ \t]*#{1,6}\s/.test(ln)) {
+      const v = ln.trim();
+      if (v) out[out.length - 1].value += '\n' + v;
+    }
   }
   return out;
 }
@@ -477,6 +580,17 @@ function checkboxLinesToMd(lines) {
  * 下面是纯函数：算出「光标在这一行按回车」该干什么，不知道 Obsidian 的存在。
  */
 
+/**
+ * 空方框后面光标该落在哪一列：方框本身 + 一个空格。
+ * 不能直接拿 `m[0].length - m[2].length` —— 模板里的占位写的是 `- [ ] 　`
+ * （末尾是全角空格，为了让那一行不至于「空着」），而 `\s` 认得全角空格，
+ * 于是 m[2] 是空串、算出来的列会多出一格，光标落到全角空格后面，
+ * 用户接着打字目标前面就多一个空格。
+ */
+function caretAfterCheckbox(m) {
+  return m[0].replace(/\s+$/, '').length + 1;
+}
+
 /** 一行是不是「缩进的『完成：xxx』」—— 缩进是必须的，顶格的「完成：」不归我们管。 */
 function isDoneLine(s) {
   const t = String(s == null ? '' : s);
@@ -551,6 +665,30 @@ function taskEnterAction(getLine, lineNo, opts) {
     };
   }
 
+  // ★ 小标题（### 及以下）行尾按回车 → 直接给一组空占位，光标停在方框后面。
+  //   这样新开一个学科 / 新开一类的时候不用手敲那两行 —— 敲出来还容易把
+  //   缩进写错（完成行必须比目标行缩一级，否则插件认不出这是一对）。
+  //   下面已经有空占位了就把光标送过去，不重复插。
+  const h = /^[ \t]*(#{3,6})[ \t]+(.+?)[ \t]*$/.exec(cur);
+  if (h) {
+    if (typeof o.ch === 'number' && o.ch < cur.replace(/\s+$/, '').length) return null;
+    const nb = CHECKBOX_LINE_RE.exec(next == null ? '' : next);
+    if (nb && !nb[2].trim() && !DONE_FIELD_RE.test(nb[2])) {
+      return { mode: 'cursor', line: lineNo + 1, ch: caretAfterCheckbox(nb) };
+    }
+    // 下面已经躺着一条写好的待办（或者别的正文）→ 别插，他多半只是想换行
+    if (nb) return null;
+    if (next != null && next.trim() !== '' && !/^[ \t]*#{1,6}\s/.test(next)) return null;
+    const hind = /^[ \t]*/.exec(cur)[0];
+    const head = hind + '- [ ] ';
+    return {
+      mode: 'insert',
+      line: lineNo,
+      text: '\n' + head + '\n' + hind + pad + label,
+      cursor: { back: 1, ch: head.length }
+    };
+  }
+
   const dn = DONE_LINE_RE.exec(cur);
   if (dn) {
     const indent = /^[ \t]*/.exec(cur)[0];
@@ -558,7 +696,7 @@ function taskEnterAction(getLine, lineNo, opts) {
     // 下面已经有一组空占位了 → 光标跳过去就行
     const nb = CHECKBOX_LINE_RE.exec(next == null ? '' : next);
     if (nb && !nb[2].trim()) {
-      return { mode: 'cursor', line: lineNo + 1, ch: nb[0].length - nb[2].length };
+      return { mode: 'cursor', line: lineNo + 1, ch: caretAfterCheckbox(nb) };
     }
     const up = nearestItem(getLine, lineNo);
     if (!dn[1].trim() && !(up && up.text)) return null;
@@ -574,6 +712,153 @@ function taskEnterAction(getLine, lineNo, opts) {
   }
 
   return null;
+}
+
+/* --------------------------------------- 学科标题行回车 → 建当天笔记 ---- */
+
+/**
+ * 「### 学科名」那一行按回车，直接把这门课今天的笔记建出来并跳过去写。
+ *
+ * 为什么要自己接管：日记里的课程清单是纯文本小标题，Obsidian 不知道
+ * `### Fundamentals of …` 和 `Subjects/Fundamentals of …/` 是同一回事，
+ * 按回车只会另起一个空行。而当天笔记的命名（日期、所在文件夹）每次都一样，
+ * 手建就是重复劳动 —— 这正是该交给插件的那种活。
+ *
+ * 和上面 taskEnterAction 一样是纯函数：算「该建哪个文件」，不碰文件系统。
+ * 「这个标题到底是不是学科」交给 resolve 回调（壳里查 Subjects/ 下有没有
+ * 同名文件夹），所以「### 阅读」「### 锻炼」这些天然不命中。
+ */
+const SUBJECT_DEFAULT_ROOT = 'Subjects';
+const SUBJECT_DEFAULT_PATH = 'Subjects/{{name}}/笔记/{{date:YYYY-MM-DD}}.md';
+const SUBJECT_DEFAULT_TPL = 'Templates/学科笔记模板.md';
+
+/** 学科笔记模板变量：{{course}} {{name}} {{date[:格式]}} {{weekday}} {{diary}}。未知的原样留着。 */
+function renderSubjectVars(tpl, vars) {
+  if (tpl == null) return '';
+  const v = vars || {};
+  return String(tpl).replace(VAR_RE, (whole, name, arg, dflt) => {
+    let out;
+    if (name === 'course' || name === 'name') out = v.name == null ? '' : String(v.name);
+    else if (name === 'date') out = v.date ? formatDate(v.date, (arg || '').trim() || DEFAULT_DATE_FORMAT) : '';
+    else if (name === 'weekday') out = v.date ? weekdayCN(v.date) : '';
+    else if (name === 'diary') out = v.diary ? '[[' + stripExt(normPath(v.diary)) + ']]' : '';
+    else return whole;                                  // 未知变量原样留着，别乱吃
+    if (out === '') out = dflt == null ? '' : dflt;
+    return out;
+  });
+}
+
+/** 目标路径归一化：挡掉 `..` 和多余斜杠，末尾补 `.md`。 */
+function normTarget(raw) {
+  const parts = [];
+  for (const seg of normPath(raw).split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') { parts.pop(); continue; }
+    parts.push(seg);
+  }
+  const p = parts.join('/');
+  return /\.md$/i.test(p) ? p : p + '.md';
+}
+
+/**
+ * 这一行里有没有指向 link 的双链？有就别重复插，直接打开。
+ *
+ * 只认两种写法：完整路径，或者**不带任何斜杠**的纯文件名短链接
+ * （`[[2026-10-07|今天的课]]`）。带路径又不等于完整路径的一律不算 ——
+ * `[[Personal/Diary/2026-10-07]]` 文件名撞了但不是同一个文件，认了就会漏插链接。
+ */
+function hasLinkTo(line, link) {
+  const t = String(line == null ? '' : line);
+  if (!t || !link) return false;
+  const re = /\[\[([^\]]+)\]\]/g;
+  let m;
+  while ((m = re.exec(t))) {
+    const raw = m[1].split('|')[0].split('#')[0].trim();
+    if (!raw) continue;
+    const inner = stripExt(raw);
+    if (inner === link) return true;
+    if (raw.indexOf('/') < 0 && inner === baseOf(link)) return true;
+  }
+  return false;
+}
+
+/**
+ * 标题行末尾按回车该干什么。返回 `{ mode:'subject', name, path, linked }`，
+ * 或者 null（不接管，交回 Obsidian 老老实实插一个空行）。
+ *
+ * 不接管的四种：不是标题行 / 标题是空的 / resolve 说这不是学科 /
+ * 光标不在行尾（行中间按回车是想把标题拆成两行，不能抢）。
+ */
+function subjectEnterAction(getLine, lineNo, ch, resolve, opts) {
+  const o = opts || {};
+  const cur = getLine(lineNo);
+  if (cur == null) return null;
+  const m = /^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$/.exec(cur);
+  if (!m) return null;
+  if (typeof ch === 'number' && ch < cur.replace(/\s+$/, '').length) return null;
+  const title = m[2].replace(/^\s*↺\s*/, '').trim();
+  if (!title) return null;
+  const name = typeof resolve === 'function' ? resolve(title) : null;
+  if (!name) return null;
+  const path = normTarget(renderSubjectVars(o.path || SUBJECT_DEFAULT_PATH, {
+    name: name, date: o.date || '', diary: o.diary || ''
+  }));
+  return {
+    mode: 'subject',
+    name: name,
+    path: path,
+    linked: hasLinkTo(getLine(lineNo + 1), stripExt(path))
+  };
+}
+
+/* ----------------------------- Shift+回车：在计划段里再开一个小节 ---- */
+
+const SECTION_DEFAULT_TITLES = ['今日计划'];
+
+/**
+ * Shift+回车：在「今日计划」这一段里**再开一个小节** —— 一整个 `###` 加一组空占位。
+ *
+ * 一个按键换三行，值得的原因是：手敲这三行最容易错的就是完成行的缩进，
+ * 少敲两个空格，插件就认不出「这是一对」，结转和输出的时候整条会静默丢掉。
+ *
+ * 返回 `{ mode:'insert', line, text, cursor }`，line 是「插在哪一行后面」，
+ * 光标停在 `### ` 后面等着打学科名。
+ *
+ * 不生效（返回 null）：往上找到的 `##` 段落标题不在允许的那个名单里 ——
+ * 今日阅读、今日复盘那些段落一个字都不动。
+ */
+function sectionEnterAction(getLine, lineNo, opts) {
+  const o = opts || {};
+  const titles = Array.isArray(o.titles) && o.titles.length ? o.titles : SECTION_DEFAULT_TITLES;
+  const label = o.label == null ? DONE_LABEL : String(o.label || DONE_LABEL);
+  const pad = o.indent == null ? DONE_INDENT : String(o.indent);
+  if (getLine(lineNo) == null) return null;
+
+  // 往上找最近的 ## 段落标题
+  let h2 = '';
+  for (let i = lineNo; i >= 0 && i > lineNo - 200; i--) {
+    const ln = getLine(i);
+    if (ln == null) break;
+    const m = /^[ \t]*(#{1,6})[ \t]+(.+?)[ \t]*$/.exec(ln);
+    if (m && m[1].length === 2) { h2 = m[2].trim(); break; }
+  }
+  if (titles.indexOf(h2) < 0) return null;
+
+  // 往下走到当前小节的末尾：撞到下一个标题或者 --- 分隔线就停，空行不算数
+  let end = lineNo;
+  for (let i = lineNo + 1; i < lineNo + 400; i++) {
+    const ln = getLine(i);
+    if (ln == null) break;
+    if (/^[ \t]*#{1,6}\s/.test(ln)) break;
+    if (/^[ \t]*---+\s*$/.test(ln)) break;
+    if (ln.trim() !== '') end = i;
+  }
+  return {
+    mode: 'insert',
+    line: end,
+    text: '\n\n### \n- [ ] \n' + pad + label,
+    cursor: { back: 2, ch: '### '.length }
+  };
 }
 
 function normKey(s) {
@@ -638,6 +923,19 @@ function fieldValue(ctx, arg) {
   return pickValue(body, keys);
 }
 
+/**
+ * `{{lines:[段落 > ]关键词}}` —— 和 `{{field:}}` 取的是同一个值，但按行拆成 `- ` 列表。
+ *
+ * 存在的理由：用户在同一条下面换行写了两三点时，`{{field:}}` 会把它们塞进一行，
+ * 而且值里有换行的话，写在 `> ` 引用块里的模板会让第二行**掉出**引用块。
+ * 用这个变量就是一行一个点，和「目标一行、完成结果一行」那套格式保持一致。
+ */
+function linesValue(ctx, arg) {
+  const v = String(fieldValue(ctx, arg) || '').trim();
+  if (!v) return '';
+  return v.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).map((s) => '- ' + s).join('\n');
+}
+
 /** `{{score:精力}}` → `4 / 5`。取不到返回空串，交给默认值。 */
 function scoreValue(ctx, arg) {
   const s = extractScores(ctx.sectionBody || '');
@@ -655,6 +953,17 @@ function checksValue(ctx, arg) {
   if (parts[1]) body = subSectionBody(body, parts[1]);
   const lines = extractCheckboxItems(body);
   if (!lines.length) return '';
+  // ★ 没指定子小节、而源段落本身就是按 ### 分小节的 → 照小节分组输出。
+  //   `{{checks:今日计划/阅读}}` 这种已经点名了子小节的不分组（parts[1] 有值）。
+  if (!parts[1]) {
+    const groups = groupBySubSection(body);
+    if (groups.length > 1) {
+      return groups.map((g) => {
+        const md = checkboxLinesToMd(g.items);
+        return md ? '### ' + (g.title || '其它') + '\n\n' + md : '';
+      }).filter(Boolean).join('\n\n');
+    }
+  }
   return checkboxLinesToMd(lines);
 }
 
@@ -677,6 +986,7 @@ function evalVar(name, arg, ctx) {
     case 'section':
       return String(contentOf(ctx, arg) || '').trim();
     case 'field': return fieldValue(ctx, arg);
+    case 'lines': return linesValue(ctx, arg);
     case 'score': return scoreValue(ctx, arg);
     case 'checks': return checksValue(ctx, arg);
     case 'fm':
@@ -702,15 +1012,7 @@ function renderTemplate(tpl, ctx) {
 
 /** 路径模板：渲染后归一化，顺手挡掉 `..` 和开头多余的斜杠。 */
 function renderPath(tpl, ctx) {
-  const raw = renderTemplate(tpl, ctx);
-  const parts = [];
-  for (const seg of normPath(raw).split('/')) {
-    if (!seg || seg === '.') continue;
-    if (seg === '..') { parts.pop(); continue; }
-    parts.push(seg);
-  }
-  const p = parts.join('/');
-  return /\.md$/i.test(p) ? p : p + '.md';
+  return normTarget(renderTemplate(tpl, ctx));
 }
 
 /** 建渲染上下文。date 在「文件名任意」模式下可能是空串，key 一定非空。 */
@@ -1145,6 +1447,16 @@ function migrateState(raw) {
   if (typeof s.lastCarry !== 'string') s.lastCarry = '';
   // 输入增强：回车自动补下一条（详见 taskEnterAction）。缺省开。
   if (s.taskEnter === undefined) s.taskEnter = true;
+  // 输入增强：学科标题行回车建当天的笔记（详见 subjectEnterAction）。
+  // 缺省**关** —— 同一个回车键默认是「补一组 - [ ] / 完成：」，这个更常用；
+  // 想要建笔记就在设置里打开，或者用命令「为光标所在学科建今天的笔记」。
+  if (s.subjectEnter === undefined) s.subjectEnter = false;
+  if (typeof s.subjectRoot !== 'string' || !s.subjectRoot.trim()) s.subjectRoot = SUBJECT_DEFAULT_ROOT;
+  if (typeof s.subjectPath !== 'string' || !s.subjectPath.trim()) s.subjectPath = SUBJECT_DEFAULT_PATH;
+  if (typeof s.subjectTemplate !== 'string' || !s.subjectTemplate.trim()) s.subjectTemplate = SUBJECT_DEFAULT_TPL;
+  // 输入增强：Shift+回车在计划段里再开一个小节（详见 sectionEnterAction）。缺省开。
+  if (s.sectionEnter === undefined) s.sectionEnter = true;
+  if (!Array.isArray(s.sectionTitles) || !s.sectionTitles.length) s.sectionTitles = SECTION_DEFAULT_TITLES.slice();
   return s;
 }
 
@@ -1287,15 +1599,19 @@ const PURE = {
   AUTO_START, AUTO_END, LEGACY_PAIRS, DEFAULT_DATE_FORMAT, MIN_SUBSTANCE,
   DEBOUNCE_MS, CARRY_MAX_GAP_DAYS, PRESET_RULES, VAR_RE,
   HEAD_TEMPLATE, REVIEW_TAIL, GROWTH_TAIL, READING_TAIL,
-  pad2, weekdayCN, daysBetween, formatDate, namePatternToRe, dateFromFileName, keyFromFileName,
+  pad2, weekdayCN, daysBetween, shiftDate, formatDate, namePatternToRe, dateFromFileName, keyFromFileName,
+  renderDailyNoteVars,
   detectEol, normPath, dirOf, baseOf, stripExt,
-  parseSections, getSection, subSectionBody, frontmatterValue,
-  stripCallouts, cleanForSubstance, cleanLen, hasSubstance, hasSubstanceOrScore,
+  parseSections, getSection, subSectionBody, groupBySubSection, frontmatterValue,
+  stripCallouts, cleanForSubstance, cleanLen, digitLen, hasSubstance, hasSubstanceOrScore,
   substanceCheck, extractLabeledBullets, pickValue, extractScores,
   extractCheckboxItems, extractCheckboxLines, checkboxLinesToMd, normKey,
   DONE_INDENT, DONE_LABEL, DONE_FIELD_RE, DONE_LINE_RE, CHECKBOX_LINE_RE,
   isDoneLine, nearestItem, taskEnterAction,
-  buildCtx, evalVar, renderTemplate, renderPath, fieldValue, scoreValue, checksValue, contentOf,
+  SUBJECT_DEFAULT_ROOT, SUBJECT_DEFAULT_PATH, SUBJECT_DEFAULT_TPL,
+  renderSubjectVars, normTarget, hasLinkTo, subjectEnterAction,
+  SECTION_DEFAULT_TITLES, sectionEnterAction,
+  buildCtx, evalVar, renderTemplate, renderPath, fieldValue, linesValue, scoreValue, checksValue, contentOf,
   findAutoBlock, hasAutoBlock, upsertAutoBlock, wrapNew,
   isUnder, fileMatchesRule, matchRules, carryOver,
   normalizeRule, normalizeRules, migrateState, runForFile,
@@ -1306,6 +1622,30 @@ const PURE = {
 
 if (obsidianApi) {
   const { Plugin, PluginSettingTab, Setting, Notice, MarkdownView } = obsidianApi;
+
+  /**
+   * 学科笔记的兜底模板：`Templates/学科笔记模板.md` 不存在时用它。
+   * 只有 {{course}} / {{date}} / {{weekday}} / {{diary}} 四个变量（见 renderSubjectVars）。
+   */
+  const SUBJECT_FALLBACK_TPL = [
+    '---',
+    'title: {{course}} · {{date:YYYY-MM-DD}}',
+    'course: {{course}}',
+    'date: {{date:YYYY-MM-DD}}',
+    'tags:',
+    '  - 课堂笔记',
+    '---',
+    '',
+    '## 今天这节课在讲什么',
+    '',
+    '## 没听懂 / 要回头补的',
+    '',
+    '## 课后要做（下次课前解决）',
+    '',
+    '---',
+    '当天日记：{{diary}}',
+    ''
+  ].join('\n');
 
   const RESULT_TEXT = {
     created: '生成',
@@ -1359,6 +1699,36 @@ if (obsidianApi) {
         name: '把上一天没做完的条目结转到今天（忽略去重）',
         callback: () => this._runToday({ notify: true, carry: true, forceCarry: true })
       });
+      this.addCommand({
+        id: 'template-derive-subject-note',
+        name: '为光标所在学科建今天的笔记',
+        callback: () => this._subjectFromCommand()
+      });
+      // 核心 Daily Notes 只会建「今天」这一份，想去明天/后天就用这个。
+      this.addCommand({
+        id: 'template-derive-new-diary',
+        name: '新建明天的日记',
+        callback: () => this._newDiaryNote(1)
+      });
+      // Calendar 插件注册了日历视图，可它自己那条命令是英文的（Calendar: Open view），
+      // 而且**只在日历还没打开时才显示** —— 已经开着的话命令直接消失，找不着人。
+      // 这里补一条中文的，不管日历开着没有都看得见。
+      this.addCommand({
+        id: 'template-derive-open-calendar',
+        name: '打开日历视图',
+        checkCallback: (checking) => {
+          if (!this._calendarAvailable()) return false;
+          if (checking) return true;
+          this._openCalendar();
+          return true;
+        }
+      });
+      // 键盘那条路万一不灵，这个命令做一模一样的事 —— 顺便能用来确认插件确实更新了。
+      this.addCommand({
+        id: 'template-derive-add-section',
+        name: '在计划里新增一个小节（### + 待办）',
+        callback: () => this._addSection()
+      });
 
       this.addSettingTab(new TemplateDeriveSettingTab(this.app, this));
 
@@ -1377,15 +1747,16 @@ if (obsidianApi) {
     }
 
     /**
-     * 回车续行。只在「有规则管着的文件」里动手 —— 别的笔记一个键都不碰。
+     * 两种回车。都只在「有规则管着的文件」里动手 —— 别的笔记一个键都不碰。
      * 命中就 preventDefault + stopPropagation 自己插；不命中就原样放行。
-     * Shift+回车 永远是普通换行，留给「就是想另起一行」的场合。
+     *
+     *   Shift+回车 → 在计划段里**再开一个小节**（### + 一组空占位），见 sectionEnterAction
+     *   普通回车   → 补「完成：」那一行 / 补一组空占位，见 taskEnterAction
      */
     _onTaskEnter(e) {
-      if (this.settings.taskEnter === false) return;
       if (e.defaultPrevented || e.isComposing) return;
       if (e.key !== 'Enter' && e.keyCode !== 13) return;
-      if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const t = e.target;
       if (!t || typeof t.closest !== 'function' || !t.closest('.cm-content')) return;
 
@@ -1402,7 +1773,41 @@ if (obsidianApi) {
       const pos = editor.getCursor();
       if (!pos || pos.line == null) return;
       const n = editor.lineCount();
-      const act = taskEnterAction((i) => (i < 0 || i >= n ? null : editor.getLine(i)), pos.line, { label });
+      const getLine = (i) => (i < 0 || i >= n ? null : editor.getLine(i));
+
+      // Shift+回车：整个小节连骨架一起给。和下面的普通回车是两条独立的路。
+      if (e.shiftKey) {
+        if (this.settings.sectionEnter === false) return;
+        const sec = sectionEnterAction(getLine, pos.line, { titles: this.settings.sectionTitles, label });
+        if (!sec) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const secAt = getLine(sec.line);
+        editor.replaceRange(sec.text, { line: sec.line, ch: secAt == null ? 0 : secAt.length });
+        editor.setCursor({
+          line: sec.line + (sec.text.match(/\n/g) || []).length - sec.cursor.back,
+          ch: sec.cursor.ch
+        });
+        return;
+      }
+
+      if (this.settings.taskEnter === false) return;
+
+      // ★ 顺序有讲究：两个功能都要「### 行尾的回车」，必须先让学科那个看一眼。
+      //   它开着、并且这一行确实是学科 → 建笔记；否则（包括它关着、或者
+      //   这行是「### 阅读」这种不是学科的）才轮到 taskEnterAction，
+      //   由它按老规矩补一组「- [ ] / 完成：」。
+      if (this.settings.subjectEnter === true) {
+        const subj = subjectEnterAction(getLine, pos.line, pos.ch,
+          (t) => this._resolveSubject(t),
+          { path: this.settings.subjectPath, date: this._today(), diary: view.file.path });
+        if (subj) {
+          this._subjectEnter(e, editor, view, pos, subj);
+          return;
+        }
+      }
+
+      const act = taskEnterAction(getLine, pos.line, { label, ch: pos.ch });
       if (!act) return;
 
       e.preventDefault();
@@ -1421,6 +1826,105 @@ if (obsidianApi) {
       });
     }
 
+    /**
+     * 学科标题行回车：建这门课今天的笔记 → 日记里留一个链接 → 跳过去写。
+     * 命中才吃掉这次回车；不命中一个字都不动（见 subjectEnterAction 里的四种放行）。
+     * e 为 null 表示是命令触发的，没有键盘事件要拦。
+     */
+    async _subjectEnter(e, editor, view, pos, act) {
+      if (!act) return;
+      try {
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+
+        const link = stripExt(act.path);
+        if (!act.linked) {
+          const at = getLine(pos.line);
+          editor.replaceRange('\n- [[' + link + ']]', { line: pos.line, ch: at == null ? 0 : at.length });
+        }
+        const made = await this._ensureSubjectFile(act, view.file.path);
+        if (made) new Notice('Template Derive：建了 ' + act.path);
+        // 同一个文件再按一次不会重复建，也不会重复插链接，只是再打开一次。
+        await this.app.workspace.openLinkText(link, view.file.path, false);
+      } catch (err) {
+        console.error('[template-derive] 学科回车出错', err);
+        new Notice('Template Derive 建笔记失败了，详见控制台');
+      }
+    }
+
+    /** 命令版：从光标往上找最近的学科小标题，干和回车一样的事。 */
+    async _subjectFromCommand() {
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view || !view.file || !view.editor) {
+        new Notice('Template Derive：先在日记里点一下');
+        return;
+      }
+      const editor = view.editor;
+      const n = editor.lineCount();
+      const getLine = (i) => (i < 0 || i >= n ? null : editor.getLine(i));
+      const pos = editor.getCursor();
+      const from = pos && pos.line != null ? pos.line : 0;
+      for (let i = from; i >= 0 && i > from - 60; i--) {
+        const act = subjectEnterAction(getLine, i, null, (t) => this._resolveSubject(t),
+          { path: this.settings.subjectPath, date: this._today(), diary: view.file.path });
+        if (act) {
+          await this._subjectEnter(null, editor, view, { line: i, ch: 0 }, act);
+          return;
+        }
+      }
+      new Notice('Template Derive：光标往上没找到学科小标题');
+    }
+
+    /** 命令版「新增一个小节」：和 Shift+回车干同一件事。 */
+    _addSection() {
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view || !view.file || !view.editor) {
+        new Notice('Template Derive：先在日记里点一下');
+        return;
+      }
+      const editor = view.editor;
+      const n = editor.lineCount();
+      const getLine = (i) => (i < 0 || i >= n ? null : editor.getLine(i));
+      const pos = editor.getCursor();
+      const rules = matchRules(this.settings.rules, view.file.path);
+      const carry = rules.find((r) => r.kind === 'carry' && r.carry && r.carry.suffix);
+      const label = (carry && carry.carry.suffix) || DONE_LABEL;
+      const act = sectionEnterAction(getLine, pos && pos.line != null ? pos.line : 0, {
+        titles: this.settings.sectionTitles, label: label
+      });
+      if (!act) {
+        new Notice('Template Derive：光标不在「' + (this.settings.sectionTitles || []).join(' / ') + '」这一段里');
+        return;
+      }
+      const at = getLine(act.line);
+      editor.replaceRange(act.text, { line: act.line, ch: at == null ? 0 : at.length });
+      editor.setCursor({
+        line: act.line + (act.text.match(/\n/g) || []).length - act.cursor.back,
+        ch: act.cursor.ch
+      });
+    }
+
+    /** 标题文字 → Subjects/ 下真有这个文件夹才认。对不上返回 null（那就不是学科）。 */
+    _resolveSubject(title) {
+      const root = normPath(this.settings.subjectRoot || SUBJECT_DEFAULT_ROOT).replace(/\/+$/, '');
+      if (!root || !title) return null;
+      if (this.app.vault.getAbstractFileByPath(root + '/' + title)) return title;
+      return null;
+    }
+
+    /** 文件不在就按模板建一个；**在就什么都不做** —— 绝不覆盖你已经写过的内容。 */
+    async _ensureSubjectFile(act, sourcePath) {
+      const key = normPath(act.path);
+      const adapter = this.app.vault.adapter;
+      if (await adapter.exists(key)) return false;
+      let body = SUBJECT_FALLBACK_TPL;
+      const tpl = normPath(this.settings.subjectTemplate || SUBJECT_DEFAULT_TPL);
+      if (tpl && await adapter.exists(tpl)) body = await adapter.read(tpl);
+      await this._write(key, renderSubjectVars(body, {
+        name: act.name, date: this._today(), diary: sourcePath
+      }));
+      return true;
+    }
+
     async saveSettings() {
       await this.saveData(this.settings);
     }
@@ -1428,6 +1932,116 @@ if (obsidianApi) {
     _today() {
       const d = new Date();
       return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    }
+
+    /**
+     * Calendar 插件有没有装并且启用。没开就干脆不显示「打开日历」这条命令 ——
+     * 宁可看不见，也别让人点了以后弹一串看不懂的报错。
+     */
+    _calendarAvailable() {
+      try {
+        const ps = this.app.plugins;
+        if (!ps) return false;
+        if (ps.enabledPlugins && typeof ps.enabledPlugins.has === 'function') {
+          return ps.enabledPlugins.has('calendar');
+        }
+        return !!(ps.plugins && ps.plugins.calendar);
+      } catch (e) {
+        return false;
+      }
+    }
+
+    /** 打开日历视图：已经开着就把它叫到前台，没开就放到右侧栏里。 */
+    async _openCalendar() {
+      const ws = this.app.workspace;
+      try {
+        const opened = ws.getLeavesOfType ? ws.getLeavesOfType('calendar') : [];
+        if (opened && opened.length) {
+          if (ws.revealLeaf) ws.revealLeaf(opened[0]);
+          return true;
+        }
+        const leaf = ws.getRightLeaf ? ws.getRightLeaf(false) : null;
+        const target = leaf || (ws.getLeaf ? ws.getLeaf(true) : null);
+        if (!target) return false;
+        await target.setViewState({ type: 'calendar', active: true });
+        if (ws.revealLeaf) ws.revealLeaf(target);
+        return true;
+      } catch (e) {
+        new Notice('Template Derive：日历没打开 —— ' + ((e && e.message) || e));
+        return false;
+      }
+    }
+
+    /**
+     * 核心 Daily Notes 的三件套：日记放哪儿、文件名什么格式、用哪份模板。
+     * 直接读核心插件自己的配置文件 —— 用户在设置里改了这里跟着变，不用再来改一遍。
+     * 读不到（比如核心 Daily Notes 压根没启用）就用内定的那组。
+     */
+    async _dailyNotesConfig() {
+      const cfg = {
+        folder: 'Personal/Diary',
+        format: 'YYYY-MM-DD',
+        template: 'Templates/日记模板.md'
+      };
+      try {
+        const j = JSON.parse(await this.app.vault.adapter.read('.obsidian/daily-notes.json'));
+        if (typeof j.folder === 'string' && j.folder.trim()) cfg.folder = normPath(j.folder.trim());
+        if (typeof j.format === 'string' && j.format.trim()) cfg.format = j.format.trim();
+        if (typeof j.template === 'string' && j.template.trim()) cfg.template = normPath(j.template.trim());
+      } catch (e) { /* 没启用核心 Daily Notes，用内定值 */ }
+      return cfg;
+    }
+
+    /**
+     * 新建某一天的日记，`days` 交给 shiftDate（传 1 就是明天）。
+     *
+     * 核心插件只给了一个「打开今天的日记」，想去明天只能手建 —— 手建最容易错的是
+     * 文件名格式和 frontmatter 里的日期，一步错这份日记就脱出整套体系：
+     * 按日期命名的规则认不出它，结转也不会来找它。所以这里照抄核心的配置来建。
+     *
+     * ★ 文件已经存在 → 只打开，**绝不动里面一个字**。
+     */
+    async _newDiaryNote(days) {
+      const cfg = await this._dailyNotesConfig();
+      const target = shiftDate(this._today(), days);
+      if (!target) return false;
+
+      const name = formatDate(target, cfg.format);
+      const path = normPath((cfg.folder ? cfg.folder.replace(/\/+$/, '') + '/' : '') + name + '.md');
+      const app = this.app;
+
+      // 已经写过了 → 打开它
+      const exist = app.vault.getAbstractFileByPath(path);
+      if (exist) {
+        await app.workspace.getLeaf(false).openFile(exist);
+        new Notice('Template Derive：' + target + ' 的日记已经有了，直接打开');
+        return true;
+      }
+
+      // 目录可能还不存在（第一次用），先补上
+      const slash = path.lastIndexOf('/');
+      const dir = slash > 0 ? path.slice(0, slash) : '';
+      try {
+        if (dir && !(await app.vault.adapter.exists(dir))) await app.vault.adapter.mkdir(dir);
+      } catch (e) { /* 已经建过了就算了 */ }
+
+      let body = '';
+      try {
+        const adapter = app.vault.adapter;
+        if (cfg.template && await adapter.exists(cfg.template)) body = await adapter.read(cfg.template);
+      } catch (e) { /* 模板不存在就建个空的，不算错 */ }
+
+      const now = new Date();
+      const content = renderDailyNoteVars(body, {
+        date: target,
+        time: pad2(now.getHours()) + ':' + pad2(now.getMinutes()),
+        title: name
+      });
+
+      const file = await app.vault.create(path, content);
+      await app.workspace.getLeaf(false).openFile(file);
+      new Notice('Template Derive：' + target + ' 的日记好了');
+      return true;
     }
 
     /** 按规则的日期格式推出「今天」的源文件名。文件名任意（`*`）的规则推不出来，跳过。 */
@@ -1620,10 +2234,65 @@ if (obsidianApi) {
       new Setting(enh)
         .setName('回车自动补下一条')
         .setDesc('在上述规则管的文件里：在「- [ ] 目标」那一行按回车，自动补出下面缩进的「完成：」行；'
-          + '在「完成：」行按回车，自动开始下一条。下面已经有空占位就直接把光标送过去。'
-          + '想单纯换行按 Shift+回车。')
+          + '在「完成：」行按回车，自动开始下一条；'
+          + '在「### 小标题」行**末尾**按回车，直接给一组「- [ ] / 完成：」，光标停在方框后面。'
+          + '下面已经有空占位就直接把光标送过去，不重复插。'
+          + '想单纯换行按 Alt+回车（Shift+回车另有用途，见下一条）。')
         .addToggle((t) => t.setValue(p.settings.taskEnter !== false).onChange(async (v) => {
           p.settings.taskEnter = v;
+          await p.saveSettings();
+        }));
+
+      new Setting(enh)
+        .setName('Shift+回车 → 在计划里再开一个小节')
+        .setDesc('在「' + (p.settings.sectionTitles || []).join(' / ') + '」这一段里按 Shift+回车：'
+          + '在光标所在小节的后面插一整个新小节 —— `###` 加一组「- [ ] / 完成：」，'
+          + '光标停在 `###` 后面等着打学科名。其它段落一个字都不动。'
+          + '键盘这条路万一不灵，命令面板里「在计划里新增一个小节（### + 待办）」做一模一样的事。')
+        .addToggle((t) => t.setValue(p.settings.sectionEnter !== false).onChange(async (v) => {
+          p.settings.sectionEnter = v;
+          await p.saveSettings();
+        }));
+      new Setting(enh)
+        .setName('允许开小节的段落')
+        .setDesc('`##` 段落标题，多个用逗号隔开。')
+        .addText((t) => t.setValue((p.settings.sectionTitles || []).join('，')).onChange(async (v) => {
+          const arr = String(v || '').split(/[,，、]/).map((s) => s.trim()).filter(Boolean);
+          p.settings.sectionTitles = arr.length ? arr : SECTION_DEFAULT_TITLES.slice();
+          await p.saveSettings();
+        }));
+
+      new Setting(enh)
+        .setName('学科标题行回车 → 建当天的笔记（默认关）')
+        .setDesc('打开后，「### 学科名」行尾按回车改成**建笔记**：按下面的路径模板建出这门课今天的笔记，'
+          + '在这一行下面留一个 [[链接]]，然后跳过去写。文件已经存在就只打开、绝不覆盖。'
+          + '只有学科文件夹里有同名文件夹的标题才认 —— 「### 阅读」「### 锻炼」这类天然不命中。'
+          + '**不打开这个开关时，那一次回车用来补一组「- [ ] / 完成：」。**'
+          + '两种情况下想单纯换行都按 Shift+回车。')
+        .addToggle((t) => t.setValue(p.settings.subjectEnter !== false).onChange(async (v) => {
+          p.settings.subjectEnter = v;
+          await p.saveSettings();
+        }));
+      new Setting(enh)
+        .setName('学科文件夹')
+        .setDesc('判定「这个标题是不是一门课」的根目录。')
+        .addText((t) => t.setValue(p.settings.subjectRoot).onChange(async (v) => {
+          p.settings.subjectRoot = v.trim() || SUBJECT_DEFAULT_ROOT;
+          await p.saveSettings();
+        }));
+      new Setting(enh)
+        .setName('笔记路径模板')
+        .setDesc('可用 {{name}}（学科文件夹名）、{{date:YYYY-MM-DD}}、{{weekday}}。')
+        .addText((t) => t.setValue(p.settings.subjectPath).onChange(async (v) => {
+          p.settings.subjectPath = v.trim() || SUBJECT_DEFAULT_PATH;
+          await p.saveSettings();
+        }));
+      new Setting(enh)
+        .setName('笔记模板文件')
+        .setDesc('库内可编辑；留空或文件不存在就用插件内置的简易模板。'
+          + '可用 {{course}} {{date:YYYY-MM-DD}} {{weekday}} {{diary}}（指回当天日记）。')
+        .addText((t) => t.setValue(p.settings.subjectTemplate).onChange(async (v) => {
+          p.settings.subjectTemplate = v.trim() || SUBJECT_DEFAULT_TPL;
           await p.saveSettings();
         }));
 

@@ -771,6 +771,217 @@ for (const n of ['复盘', '成长轨迹', '阅读记录']) {
     }
   }
 
+  /* --------------------------------------- ### 小标题行尾回车 → 补一组 ---- */
+  {
+    // 传 ch（光标列）：只有停在行尾才接管
+    const atH = (arr, ln, ch, opts) => P.taskEnterAction(
+      (i) => (arr[i] === undefined ? null : arr[i]), ln,
+      Object.assign({ label: '完成：' }, opts || {}, { ch: ch === undefined ? arr[ln].length : ch }));
+
+    group('### 小标题行尾回车');
+    {
+      const a = atH(['### Precision Design', ''], 0);
+      ok('空小节 → 补出一组，光标停在方框后面',
+        a && a.mode === 'insert' && a.text === '\n- [ ] \n  完成：'
+          && a.cursor.back === 1 && a.cursor.ch === '- [ ] '.length, a);
+    }
+    {
+      const a = atH(['### Precision Design', '### English'], 0);
+      ok('下面紧挨着另一个小标题 → 照样补', a && a.mode === 'insert', a);
+    }
+    {
+      const a = atH(['### 阅读', '- [ ] 　', '  完成：'], 0);
+      ok('下面已经有模板的空占位 → 光标送过去，不重复插',
+        a && a.mode === 'cursor' && a.line === 1 && a.ch === '- [ ] '.length, a);
+    }
+    {
+      const a = atH(['### 阅读', '- [ ] 已经写好的目标', '  完成：'], 0);
+      ok('下面是一条写好的待办 → 不接管', a === null, a);
+    }
+    {
+      const a = atH(['### 阅读', '随手记一行'], 0);
+      ok('下面是别的正文 → 不接管', a === null, a);
+    }
+    ok('光标不在行尾 → 不接管', atH(['### 阅读', ''], 0, 4) === null);
+    ok('## 段落标题不归它管（那是段落，不是条目分组）', atH(['## 今日计划', ''], 0) === null);
+    {
+      const a = atH(['### 阅读   ', ''], 0);
+      ok('标题末尾带空格也认', a && a.mode === 'insert', a);
+    }
+    {
+      const a = atH(['  ### 阅读', ''], 0);
+      ok('标题有缩进 → 补出来的两行跟着缩进',
+        a && a.text === '\n  - [ ] \n    完成：' && a.cursor.ch === '  - [ ] '.length, a);
+    }
+  }
+
+  /* ------------------------------------- 学科标题行回车 → 建当天笔记 ---- */
+  {
+    const SUBJ = 'Fundamentals of Digital Design and Manufacturing Technology';
+    const only = {}; only[SUBJ] = true;
+    const resolve = (t) => (only[t] ? t : null);
+    const lines = [
+      '## 今日计划',
+      '### ' + SUBJ,
+      '- [ ] 　',
+      '  完成：',
+      '### 阅读',
+      '- [ ] 　'
+    ];
+    const at2 = (ln, ch) => P.subjectEnterAction(
+      (i) => (lines[i] === undefined ? null : lines[i]), ln,
+      ch === undefined ? lines[ln].length : ch, resolve,
+      { date: '2026-10-07', diary: 'Personal/Diary/2026-10-07.md' });
+    const withNext = (next) => {
+      const l = lines.slice(); l[2] = next;
+      return P.subjectEnterAction((i) => (l[i] === undefined ? null : l[i]), 1, l[1].length, resolve, { date: '2026-10-07' });
+    };
+
+    group('学科标题行回车');
+    {
+      const a = at2(1);
+      ok('学科标题行末尾回车 → 算出当天的笔记路径',
+        a && a.mode === 'subject' && a.name === SUBJ
+          && a.path === 'Subjects/' + SUBJ + '/笔记/2026-10-07.md', a);
+    }
+    ok('下面还是空的待办框 → 还没插过链接', at2(1).linked === false);
+    ok('下面已经有完整路径的链接 → 别重复插',
+      withNext('- [[Subjects/' + SUBJ + '/笔记/2026-10-07]]').linked === true);
+    ok('链接只写了文件名 + 别名，也算数',
+      withNext('- [[2026-10-07|今天的课]]').linked === true);
+    ok('下面是不相干的链接 → 不算', withNext('- [[Personal/Diary/2026-10-07]]').linked === false);
+    ok('不是学科（### 阅读）→ 不接管', at2(4) === null);
+    ok('不是标题行 → 不接管', at2(2) === null);
+    ok('光标不在行尾 → 不接管（那是想把标题拆成两行）', at2(1, 5) === null);
+    {
+      const l = ['### ' + SUBJ + '   '];
+      const a = P.subjectEnterAction((i) => (l[i] === undefined ? null : l[i]), 0, l[0].length, resolve, { date: '2026-10-07' });
+      ok('标题末尾带空格、光标在最后 → 照样接管', a && a.mode === 'subject', a);
+    }
+    ok('resolve 说不认识 → 不接管',
+      P.subjectEnterAction((i) => (i === 0 ? '### ' + SUBJ : null), 0, 0, () => null, { date: '2026-10-07' }) === null);
+  }
+  {
+    group('学科笔记模板变量');
+    const v = { name: 'English', date: '2026-10-07', diary: 'Personal/Diary/2026-10-07.md' };
+    ok('{{course}} / {{name}} → 学科名', P.renderSubjectVars('{{course}}·{{name}}', v) === 'English·English');
+    ok('{{date:YYYY-MM}} 按给的格式', P.renderSubjectVars('{{date:YYYY-MM}}', v) === '2026-10');
+    ok('{{date}} 走默认格式', P.renderSubjectVars('{{date}}', v) === '2026-10-07');
+    ok('{{weekday}} 是星期几', P.renderSubjectVars('{{weekday}}', v) === P.weekdayCN('2026-10-07'));
+    ok('{{diary}} 是去掉 .md 的双链', P.renderSubjectVars('{{diary}}', v) === '[[Personal/Diary/2026-10-07]]');
+    ok('未知变量原样留着（不吃核心模板的变量）', P.renderSubjectVars('{{title}}', v) === '{{title}}');
+    ok('取不到值就退到默认值', P.renderSubjectVars('{{course|未命名}}', {}) === '未命名');
+  }
+  {
+    group('目标路径归一化');
+    ok('挡掉 ..', P.normTarget('Subjects/../Subjects/English/笔记/a.md') === 'Subjects/English/笔记/a.md');
+    ok('末尾补 .md', P.normTarget('Subjects/English/笔记/2026-10-07') === 'Subjects/English/笔记/2026-10-07.md');
+  }
+  /* --------------------------------- Shift+回车 → 在计划段里再开一个小节 ---- */
+  {
+    const LINES = [
+      '## 今日计划',
+      '### Precision Design and Dimensional Inspection',
+      '- [ ] 　对几何公差有直观认识',
+      '  完成：',
+      '### 阅读',
+      '- [ ] 　',
+      '  完成：',
+      '',
+      '---',
+      '',
+      '## 今日复盘',
+      '- **去哪（Feed up）**：'
+    ];
+    const at3 = (ln) => P.sectionEnterAction((i) => (LINES[i] === undefined ? null : LINES[i]), ln, {});
+
+    group('Shift+回车：新开一个小节');
+    {
+      const a = at3(2);
+      ok('光标在待办行 → 插在**当前小节末尾**，不是光标下面',
+        a && a.mode === 'insert' && a.line === 3, a);
+      ok('给的是一整个小节：### + 一组空占位',
+        a && a.text === '\n\n### \n- [ ] \n  完成：', a);
+      ok('光标停在 ### 后面等着打学科名',
+        a && a.cursor.back === 2 && a.cursor.ch === '### '.length, a);
+    }
+    ok('光标在「### 阅读」这一行 → 插在它自己那一节的末尾', at3(4).line === 6);
+    ok('光标在「## 今日计划」这一行 → 新小节排在整段的最前面', at3(0).line === 0);
+    ok('下面撞到 --- 分隔线就停，不会插到分隔线外面去', at3(6).line === 6);
+    ok('不在「今日计划」这一段 → 不生效（今日复盘里按没反应）', at3(11) === null);
+    {
+      const a = P.sectionEnterAction((i) => (LINES[i] === undefined ? null : LINES[i]), 2,
+        { titles: ['今日复盘'], label: '结果：' });
+      ok('段落名单改了就只在新的段落里生效，且完成行标签跟着走', a === null);
+    }
+    {
+      const only = ['## 今日计划', '### 数学', '- [ ] ', '  完成：'];
+      const a = P.sectionEnterAction((i) => (only[i] === undefined ? null : only[i]), 1, {});
+      ok('文件末尾也能插（不会越界）', a && a.line === 3 && a.mode === 'insert', a);
+    }
+  }
+  {
+    group('新建明天的日记：日期挪动');
+    ok('明天', P.shiftDate('2026-10-07', 1) === '2026-10-08', P.shiftDate('2026-10-07', 1));
+    ok('昨天（负数）', P.shiftDate('2026-10-07', -1) === '2026-10-06', P.shiftDate('2026-10-07', -1));
+    ok('原地不动（0）', P.shiftDate('2026-10-07', 0) === '2026-10-07');
+    ok('跨月：10-31 → 11-01', P.shiftDate('2026-10-31', 1) === '2026-11-01', P.shiftDate('2026-10-31', 1));
+    ok('跨年：12-31 → 明年 01-01', P.shiftDate('2026-12-31', 1) === '2027-01-01', P.shiftDate('2026-12-31', 1));
+    ok('跨回去：01-01 → 去年 12-31', P.shiftDate('2027-01-01', -1) === '2026-12-31');
+    ok('闰年：2028-02-28 → 02-29', P.shiftDate('2028-02-28', 1) === '2028-02-29', P.shiftDate('2028-02-28', 1));
+    ok('平年：2027-02-28 → 03-01', P.shiftDate('2027-02-28', 1) === '2027-03-01', P.shiftDate('2027-02-28', 1));
+    ok('一年后也算得对', P.shiftDate('2026-10-07', 365) === '2027-10-07', P.shiftDate('2026-10-07', 365));
+    ok('日期格式不对返回空串（不瞎猜）', P.shiftDate('明天', 1) === '' && P.shiftDate('', 1) === '');
+  }
+  {
+    group('新建明天的日记：核心模板变量');
+    const r = (tpl, vars) => P.renderDailyNoteVars(tpl, vars);
+    const v = { date: '2026-10-08', time: '09:30', title: '2026-10-08' };
+
+    ok('{{date:YYYY-MM-DD}}', r('date: {{date:YYYY-MM-DD}}', v) === 'date: 2026-10-08');
+    ok('{{date:dddd}} 给星期', r('{{date:dddd}}', v) === '星期四', r('{{date:dddd}}', v));
+    ok('不带格式的 {{date}} 走默认 YYYY-MM-DD', r('{{date}}', v) === '2026-10-08', r('{{date}}', v));
+    ok('{{time}}', r('{{time}}', v) === '09:30');
+    ok('{{title}}', r('{{title}}', v) === '2026-10-08');
+    ok('冒号两边有空格也认', r('{{ date : YYYY-MM-DD }}', v) === '2026-10-08', r('{{ date : YYYY-MM-DD }}', v));
+    // 红线①：认不出来的变量必须原样留下 —— 别的插件的变量不能被吃掉
+    ok('未知变量原样保留', r('{{gibberish}}', v) === '{{gibberish}}', r('{{gibberish}}', v));
+    ok('核心 {{title}} 之外的写法也保住', r('{{ yay }}', v) === '{{ yay }}', r('{{ yay }}', v));
+    ok('空模板不炸', r('', v) === '' && P.renderDailyNoteVars(null, v) === '');
+    ok('vars 缺字段时不崩，也不把变量换成空白',
+      r('{{date:YYYY}} {{time}}', {}) === '{{date:YYYY}} {{time}}', r('{{date:YYYY}} {{time}}', {}));
+  }
+  {
+    group('新建明天的日记：整份模板端到端');
+    const tpl = fs.existsSync(path.join(FIX, '日记模板.md'))
+      ? fs.readFileSync(path.join(FIX, '日记模板.md'), 'utf8') : '';
+    if (!tpl) {
+      ok('fixtures 里得有日记模板', false, '缺 fixtures/日记模板.md');
+    } else {
+      const out = P.renderDailyNoteVars(tpl, { date: '2026-10-08', time: '21:00', title: '2026-10-08' });
+      ok('frontmatter 里的日期换成明天', out.indexOf('date: 2026-10-08') > 0, out.slice(0, 80));
+      ok('星期跟着对（2026-10-08 是星期四）', out.indexOf('weekday: 星期四') > 0);
+      ok('模板里没留下没换掉的 {{date', out.indexOf('{{date') < 0, out.match(/\{\{[^}]*\}\}/g));
+      ok('不确定性：列表那些内容没被改写',
+        (out.match(/### /g) || []).length === (tpl.match(/### /g) || []).length);
+      ok('一行的数量不变（只换变量，不动版式）',
+        out.split(/\r?\n/).length === tpl.split(/\r?\n/).length,
+        out.split(/\r?\n/).length + ' vs ' + tpl.split(/\r?\n/).length);
+    }
+  }
+  {
+    group('设置迁移');
+    const s = P.migrateState({ rules: [] });
+    ok('新的四项有默认值，建笔记那个开关默认关（回车留给补骨架）',
+      s.subjectEnter === false && s.subjectRoot === 'Subjects'
+        && s.subjectPath === 'Subjects/{{name}}/笔记/{{date:YYYY-MM-DD}}.md'
+        && s.subjectTemplate === 'Templates/学科笔记模板.md'
+        && s.taskEnter === true && s.sectionEnter === true
+        && Array.isArray(s.sectionTitles) && s.sectionTitles[0] === '今日计划', s);
+    const s2 = P.migrateState({ rules: [], subjectEnter: false, taskEnter: false });
+    ok('用户关过的开关不会被 migrate 打开', s2.subjectEnter === false && s2.taskEnter === false);
+  }
+
   console.log('\n' + (fail ? '★ ' + fail + ' 项失败，' + pass + ' 项通过' : '全部通过（' + pass + ' 项）'));
   process.exit(fail ? 1 : 0);
 })().catch((e) => {

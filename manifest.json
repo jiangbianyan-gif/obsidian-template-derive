@@ -1,7 +1,7 @@
 {
   "id": "template-derive",
   "name": "Template Derive",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "minAppVersion": "1.5.0",
   "description": "自定义规则，把源笔记里某个段落自动衍生到指定位置的文件。写了才生成，没写就不生成。Derive files from a note section with custom rules and templates.",
   "author": "jiangbianyan-gif",
