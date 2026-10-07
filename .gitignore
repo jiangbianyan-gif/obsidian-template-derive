@@ -1,0 +1,11 @@
+node_modules/
+package-lock.json
+
+# 插件运行时数据：每条规则的配置和结转记账，属于使用者自己的东西
+data.json
+
+# 原子写入的临时文件，正常情况不会留下
+*.wbtmp
+
+.DS_Store
+Thumbs.db
