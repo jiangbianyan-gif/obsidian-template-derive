@@ -1,0 +1,96 @@
+name: Release
+
+# 手动触发。版本号留空 = 直接用 manifest.json 里的 version。
+# tag 由这个 workflow 自己建，不要手动建，也不带前缀 v —— Obsidian 认的是
+# 「tag 名 === manifest.json 的 version」。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本号（留空 = 用 manifest.json 里的 version）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 确定版本号
+        id: v
+        run: |
+          IN="${{ github.event.inputs.version }}"
+          if [ -n "$IN" ]; then
+            V="$IN"
+          else
+            V="$(node -p "require('./manifest.json').version")"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "要发布：$V"
+
+      - name: 发布前校验（任何一项不过就不发）
+        run: |
+          set -e
+          V="${{ steps.v.outputs.version }}"
+          MV="$(node -p "require('./manifest.json').version")"
+          echo "manifest.json 里写的是：$MV"
+          echo "这次要发布的是：$V"
+          if [ "$MV" != "$V" ]; then
+            echo "★ 两者不一致。先把 manifest.json 的 version 改成 $V，或者把版本号输入清空。"
+            exit 1
+          fi
+
+          node -e '
+            const v = process.argv[1];
+            const m = require("./manifest.json");
+            const vs = require("./versions.json");
+            const need = ["id", "name", "version", "minAppVersion", "description", "author"];
+            for (const k of need) {
+              if (!m[k]) { console.error("★ manifest.json 缺字段：" + k); process.exit(1); }
+            }
+            if (!vs[v]) { console.error("★ versions.json 里没有 " + v + " 这一版"); process.exit(1); }
+            if (vs[v] !== m.minAppVersion) {
+              console.error("★ versions.json 里的 minAppVersion（" + vs[v] + "）和 manifest.json（" + m.minAppVersion + "）不一致");
+              process.exit(1);
+            }
+            console.log("manifest.json 与 versions.json 都对得上");
+          ' "$V"
+
+          node --check main.js
+          echo "main.js 语法通过"
+
+          for f in main.js manifest.json; do
+            test -f "$f" || { echo "★ 缺产物：$f"; exit 1; }
+          done
+          echo "两个产物都在"
+
+      - name: 跑测试
+        run: node test/run.cjs
+
+      - name: 建 tag 并发 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          if gh release view "$V" >/dev/null 2>&1; then
+            echo "★ $V 已经发布过了，换个版本号再发"
+            exit 1
+          fi
+          gh release create "$V" \
+            --title "$V" \
+            --generate-notes \
+            main.js manifest.json
+          echo "发布完成：$V"
+          echo "Release 里挂了 main.js 和 manifest.json，用户下载这两个文件放到 .obsidian/plugins/template-derive/ 即可。"
