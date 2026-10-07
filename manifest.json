@@ -1,7 +1,7 @@
 {
   "id": "template-derive",
   "name": "模板衍生",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.5.0",
   "description": "自定义规则：某个文件夹里笔记的某个段落，自动渲染到指定位置的另一个文件。写了才生成，没写就不生成；已生成的内容跟着源笔记同步更新，你在标记外面写的东西永不覆盖。",
   "author": "jiangbianyan-gif",
